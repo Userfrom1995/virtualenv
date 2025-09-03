@@ -13,6 +13,11 @@ except ImportError:
     # Fallback if plugin system not available
     PluginLoader = None
 
+try:  # version info for managed bootstrap tagging
+    from virtualenv.version import __version__ as VENV_VERSION
+except Exception:  # pragma: no cover - defensive fallback
+    VENV_VERSION = "unknown"
+
 
 PREFERRED_NAMES = (".venv", "venv", "env", ".env")
 
@@ -359,17 +364,34 @@ def emit_bootstrap(shell: str) -> str:
     """Generate the bootstrap function for the given shell."""
     s = shell.lower()
     if s in {"bash", "zsh", "sh"}:
-        print("DEBUG: Generating bootstrap for bash/zsh/sh", file=sys.stderr)
+        # Forward CLI flags to the real envon, only eval activation when args look like targets
         return (
             "envon() {\n"
-            "  local cmd;\n"
-            "  cmd=\"$(command envon --emit bash \"$@\")\" || { echo \"$cmd\" >&2; return 1; };\n"
+            "  if [ \"$#\" -gt 0 ]; then\n"
+            "    case \"$1\" in\n"
+            "      --) shift ;;\n"
+            "      help|-h|--help) command envon \"$@\"; return $? ;;\n"
+            "      -*) command envon \"$@\"; return $? ;;\n"
+            "    esac\n"
+            "  fi\n"
+            "  local cmd ec;\n"
+            "  cmd=\"$(command envon --emit bash \"$@\")\"; ec=$?\n"
+            "  if [ $ec -ne 0 ]; then printf %s\\n \"$cmd\" >&2; return $ec; fi\n"
             "  eval \"$cmd\";\n"
             "}\n"
         )
     if s == "fish":
         return (
             "function envon\n"
+            "    if test (count $argv) -gt 0\n"
+            "        set first $argv[1]\n"
+            "        if test \"$first\" = \"--\"\n"
+            "            set -e argv[1]\n"
+            "        else if string match -rq '^(help|-h|--help|-).*' -- $first\n"
+            "            command envon $argv\n"
+            "            return $status\n"
+            "        end\n"
+            "    end\n"
             "    set cmd (command envon --emit fish $argv)\n"
             "    if test $status -ne 0\n"
             "        echo $cmd >&2\n"
@@ -381,6 +403,15 @@ def emit_bootstrap(shell: str) -> str:
     if s in {"nushell", "nu"}:
         return (
             "def-env envon [...args] {\n"
+            "  if ($args | is-empty) == false {\n"
+            "    let first = ($args | get 0)\n"
+            "    if ($first == \"--\") {\n"
+            "      $args = ($args | skip 1)\n"
+            "    } else if ($first in [help] or ($first | str starts-with '-')) {\n"
+            "      ^envon ...$args\n"
+            "      return\n"
+            "    }\n"
+            "  }\n"
             "  let cmd = (^envon --emit nushell ...$args)\n"
             "  overlay use $cmd\n"
             "}\n"
@@ -388,11 +419,16 @@ def emit_bootstrap(shell: str) -> str:
     if s in {"powershell", "pwsh"}:
         return (
             "function envon {\n"
-            "  param([Parameter(Position=0)][string]$Target)\n"
-            "  $argsList = @(); if ($Target) { $argsList += $Target }\n"
+            "  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)\n"
             "  $envonExe = Get-Command envon -CommandType Application -ErrorAction SilentlyContinue\n"
             "  if (-not $envonExe) { Write-Error 'envon console script not found on PATH'; return }\n"
-            "  $cmd = & $envonExe.Source --emit powershell @argsList\n"
+            "  if ($Args.Count -gt 0) {\n"
+            "    if ($Args[0] -eq '--') { $Args = $Args[1..($Args.Count-1)] }\n"
+            "    elseif ($Args[0] -eq 'help' -or $Args[0].StartsWith('-')) {\n"
+            "      & $envonExe.Source @Args; return\n"
+            "    }\n"
+            "  }\n"
+            "  $cmd = & $envonExe.Source --emit powershell @Args\n"
             "  if ($LASTEXITCODE -ne 0) { Write-Error $cmd; return }\n"
             "  Invoke-Expression $cmd\n"
             "}\n"
@@ -454,36 +490,151 @@ def install_bootstrap(shell: str) -> str:
     # Ensure parent directory exists
     config_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Get the bootstrap content
-    if shell in {"bash", "zsh", "sh"}:
-        content = '\n# envon bootstrap function (added by envon --install)\neval "$(envon --bootstrap bash)"\n'
-    elif shell == "fish":
-        content = '\n# envon bootstrap function (added by envon --install)\nenvon --bootstrap fish | source\n'
-    elif shell in {"nushell", "nu"}:
-        content = '\n# envon bootstrap function (added by envon --install)\nsource (envon --bootstrap nushell | str trim)\n'
-    elif shell in {"powershell", "pwsh"}:
-        content = '\n# envon bootstrap function (added by envon --install)\nInvoke-Expression (envon --bootstrap powershell)\n'
-    elif shell in {"csh", "tcsh", "cshell"}:
-        content = '\n# envon bootstrap function (added by envon --install)\neval "`envon --bootstrap csh`"\n'
-    else:
+    # Managed bootstrap: write function to a stable file and source it from RC with markers
+    managed_file = get_managed_bootstrap_path(shell)
+    managed_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Generate function content for the managed file
+    target_shell = (
+        "bash" if shell in {"bash", "zsh", "sh"} else
+        "fish" if shell == "fish" else
+        "nushell" if shell in {"nushell", "nu"} else
+        "powershell" if shell in {"powershell", "pwsh"} else
+        "csh" if shell in {"csh", "tcsh", "cshell"} else None
+    )
+    if target_shell is None:
         raise EnvonError(f"Unsupported shell for installation: {shell}")
-    
-    # Check if already installed
-    if config_path.exists():
-        existing_content = config_path.read_text()
-        if "envon --bootstrap" in existing_content or "envon bootstrap function" in existing_content:
-            return f"envon bootstrap function already installed in {config_path}"
-    
-    # Append to configuration file
+    content = _managed_content_for_shell(target_shell)
+    _write_managed_if_changed(managed_file, content)
+
+    # Ensure RC contains a single, marked source block
+    _ensure_rc_sources_managed(config_path, managed_file, shell)
+    return (
+        f"envon bootstrap installed:\n- managed: {managed_file}\n- rc: {config_path}\n"
+        f"Restart your shell or run: source {config_path}"
+    )
+
+
+MARK_START = "# >>> envon bootstrap >>>"
+MARK_END = "# <<< envon bootstrap <<<"
+
+
+def get_managed_bootstrap_path(shell: str) -> Path:
+    """Return the managed bootstrap file path for a shell."""
+    shell = shell.lower()
+    # Determine config base dir
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    envon_dir = base / "envon"
+
+    name = (
+        "envon.bash" if shell in {"bash", "zsh", "sh"} else
+        "envon.fish" if shell == "fish" else
+        "envon.nu" if shell in {"nushell", "nu"} else
+        "envon.ps1" if shell in {"powershell", "pwsh"} else
+        "envon.csh" if shell in {"csh", "tcsh", "cshell"} else None
+    )
+    if name is None:
+        raise EnvonError(f"Unsupported shell: {shell}")
+    return envon_dir / name
+
+
+def _write_managed_if_changed(path: Path, content: str) -> None:
+    """Write content to path if missing or different."""
+    try:
+        if path.exists() and path.read_text() == content:
+            return
+    except Exception:
+        # If read fails, attempt to overwrite
+        pass
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _ensure_rc_sources_managed(config_path: Path, managed_file: Path, shell: str) -> None:
+    """Ensure the user's RC/profile sources the managed file, using idempotent markers."""
+    rc_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+
+    # If already installed with markers, do nothing
+    if MARK_START in rc_text and MARK_END in rc_text:
+        return
+
+    mf = managed_file.as_posix()
+    if shell in {"bash", "zsh", "sh"}:
+        block = f"\n{MARK_START}\n[ -f {mf} ] && . {mf}\n{MARK_END}\n"
+    elif shell == "fish":
+        block = f"\n{MARK_START}\nif test -f {mf}\n    source {mf}\nend\n{MARK_END}\n"
+    elif shell in {"nushell", "nu"}:
+        # guard exists via ls check
+        block = (
+            f"\n{MARK_START}\n"
+            f"if (ls {mf} | is-empty) == false {{\n    source {mf}\n}}\n"
+            f"{MARK_END}\n"
+        )
+    elif shell in {"powershell", "pwsh"}:
+        block = (
+            f"\n{MARK_START}\n"
+            f"$envonPath = '{managed_file}'\nif (Test-Path $envonPath) {{ . $envonPath }}\n"
+            f"{MARK_END}\n"
+        )
+    elif shell in {"csh", "tcsh", "cshell"}:
+        block = f"\n{MARK_START}\nif ( -f {mf} ) source {mf}\n{MARK_END}\n"
+    else:
+        raise EnvonError(f"Unsupported shell: {shell}")
+
+    # Append the block
     with config_path.open("a", encoding="utf-8") as f:
-        f.write(content)
-    
-    return f"envon bootstrap function installed to {config_path}\nRestart your shell or run: source {config_path}"
+        f.write(block)
+
+
+def _managed_content_for_shell(shell: str) -> str:
+    """Build the content stored in the managed file, tagged with the package version.
+
+    Including the version allows us to detect when an upgrade may require refreshing
+    the managed file, while avoiding unnecessary rewrites.
+    """
+    body = emit_bootstrap(shell)
+    header = f"# envon managed bootstrap - version: {VENV_VERSION}\n"
+    return header + body
+
+
+def _maybe_update_managed_current_shell(explicit_shell: str | None) -> None:
+    """If a managed bootstrap file exists for the current/detected shell, refresh it when outdated.
+
+    This runs silently on each invocation and only writes when the content differs,
+    so normal runs stay fast and side-effect free for already up-to-date installs.
+    """
+    try:
+        shell = detect_shell(explicit_shell)
+        managed = get_managed_bootstrap_path(shell)
+        if managed.exists():
+            desired = _managed_content_for_shell(
+                "bash" if shell in {"bash", "zsh", "sh"}
+                else "fish" if shell == "fish"
+                else "nushell" if shell in {"nushell", "nu"}
+                else "powershell" if shell in {"powershell", "pwsh"}
+                else "csh" if shell in {"csh", "tcsh", "cshell"}
+                else shell
+            )
+            try:
+                current = managed.read_text(encoding="utf-8")
+            except Exception:
+                current = ""
+            if current != desired:
+                _write_managed_if_changed(managed, desired)
+    except Exception:
+        # Never fail the main command due to a managed-file refresh issue
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
     ns = parse_args(argv or sys.argv[1:])
     try:
+        # Opportunistic refresh of managed bootstrap (no-op if not installed)
+        _maybe_update_managed_current_shell(ns.emit)
         if ns.bootstrap:
             # print(f"DEBUG: sys.stdout is {sys.stdout!r}", file=sys.stderr)
             # data = emit_bootstrap(ns.bootstrap)
