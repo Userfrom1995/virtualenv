@@ -1,0 +1,420 @@
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import shutil
+import sys
+from pathlib import Path
+
+try:
+    from virtualenv.run.plugin.base import PluginLoader
+except ImportError:
+    # Fallback if plugin system not available
+    PluginLoader = None
+
+
+PREFERRED_NAMES = (".venv", "venv", "env", ".env")
+
+
+class EnvonError(Exception):
+    pass
+
+
+def is_venv_dir(path: Path) -> bool:
+    """Return True if the given path looks like a Python virtual environment directory."""
+    if not path or not path.is_dir():
+        return False
+    
+    # Check for pyvenv.cfg file - this is the most reliable indicator
+    if (path / "pyvenv.cfg").exists():
+        return True
+    
+    # Try to use virtualenv's activation system to detect available scripts
+    if PluginLoader:
+        try:
+            activators = PluginLoader.entry_points_for("virtualenv.activate")
+            # Check if any activation scripts exist
+            for activator_name in ["bash", "batch", "powershell", "fish", "cshell", "nushell"]:
+                if activator_name in activators:
+                    # Check common script locations based on platform
+                    if activator_name == "bash" and (path / "bin" / "activate").exists():
+                        return True
+                    if activator_name == "batch" and (path / "Scripts" / "activate.bat").exists():
+                        return True
+                    if activator_name == "powershell" and (path / "Scripts" / "Activate.ps1").exists():
+                        return True
+                    if activator_name == "fish" and (path / "bin" / "activate.fish").exists():
+                        return True
+                    if activator_name == "cshell" and (path / "bin" / "activate.csh").exists():
+                        return True
+                    if activator_name == "nushell" and (path / "bin" / "activate.nu").exists():
+                        return True
+        except Exception:
+            # Fall back to hardcoded detection
+            pass
+    
+    # Fallback: hardcoded detection for compatibility
+    # Windows layout
+    if (path / "Scripts" / "activate.bat").exists() or (path / "Scripts" / "Activate.ps1").exists():
+        return True
+    # POSIX layout
+    if (path / "bin" / "activate").exists():
+        return True
+    # Other shells
+    if (path / "bin" / "activate.fish").exists() or (path / "bin" / "activate.csh").exists() or (path / "bin" / "activate.nu").exists():
+        return True
+    return False
+
+
+def find_nearest_venv(start: Path) -> Path | None:
+    """Walk upwards from start to root and try common names; return the first venv path found."""
+    cur = start
+    tried: list[Path] = []
+    while True:
+        for name in PREFERRED_NAMES:
+            cand = cur / name
+            tried.append(cand)
+            if is_venv_dir(cand):
+                return cand
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def _list_venvs_in_dir(root: Path) -> list[Path]:
+    """Return all virtualenv directories directly under root.
+
+    Preference order: common names first (PREFERRED_NAMES) in that order, then any other subdirectory
+    that looks like a venv in alphabetical order.
+    """
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for name in PREFERRED_NAMES:
+        cand = root / name
+        if is_venv_dir(cand):
+            found.append(cand)
+            seen.add(cand)
+    # Scan all subdirectories
+    try:
+        for child in sorted([p for p in root.iterdir() if p.is_dir()]):
+            if child in seen:
+                continue
+            if is_venv_dir(child):
+                found.append(child)
+    except FileNotFoundError:
+        pass
+    return found
+
+
+def _choose_interactively(candidates: list[Path], context: str) -> Path:
+    """Prompt the user to choose a venv when multiple are found.
+
+    If stdin is not a TTY, print options and raise EnvonError.
+    """
+    if not sys.stdin.isatty():
+        lines = "\n".join(f"  {i+1}) {p}" for i, p in enumerate(candidates))
+        raise EnvonError(
+            f"Multiple virtual environments found in {context}. Choose one by passing a path or name:\n{lines}"
+        )
+    print(f"Multiple virtual environments found in {context}:", file=sys.stderr)
+    for i, p in enumerate(candidates, 1):
+        print(f"  {i}) {p}", file=sys.stderr)
+    while True:
+        # Print prompt to stderr so command substitution doesn't capture it
+        sys.stderr.write("Select [1-{}]: ".format(len(candidates)))
+        sys.stderr.flush()
+        try:
+            sel = sys.stdin.readline()
+        except Exception:
+            raise EnvonError("Aborted.")
+        if not sel:
+            raise EnvonError("Aborted.")
+        sel = sel.strip()
+        if not sel:
+            continue
+        if sel.isdigit():
+            idx = int(sel)
+            if 1 <= idx <= len(candidates):
+                return candidates[idx - 1]
+        print("Invalid selection.", file=sys.stderr)
+
+
+def resolve_target(target: str | None) -> Path:
+    if not target:
+        # First, prefer venvs directly in the current directory; if multiple, ask.
+        cwd = Path.cwd()
+        in_here = _list_venvs_in_dir(cwd)
+        if len(in_here) == 1:
+            return in_here[0]
+        if len(in_here) > 1:
+            return _choose_interactively(in_here, str(cwd))
+        # Fallback to walking upwards to find a named venv (e.g., project/.venv)
+        venv = find_nearest_venv(cwd)
+        if not venv:
+            raise EnvonError("No virtual environment found here. Create one (e.g., '.venv') or pass a path.")
+        return venv
+
+    p = Path(target)
+    if p.exists():
+        if p.is_dir() and is_venv_dir(p):
+            return p
+        # Allow passing project root; try common children
+        multiple = _list_venvs_in_dir(p)
+        if len(multiple) == 1:
+            return multiple[0]
+        if len(multiple) > 1:
+            return _choose_interactively(multiple, str(p))
+        raise EnvonError(f"Path does not appear to contain a virtual environment: {p}")
+
+    # Fallback: WORKON_HOME name
+    workon = os.environ.get("WORKON_HOME")
+    if workon:
+        cand = Path(workon) / target
+        if is_venv_dir(cand):
+            return cand
+    raise EnvonError(f"Cannot resolve virtual environment from argument: {target}")
+
+
+def detect_shell(explicit: str | None) -> str:
+    if explicit:
+        return explicit.lower()
+
+    # Heuristics by platform/env
+    if os.name == "nt":
+        # Prefer powershell if detected
+        parent_proc = os.environ.get("PSModulePath") or os.environ.get("PROMPT")
+        if parent_proc and "PSModulePath" in os.environ:
+            return "powershell"
+        return "cmd"
+    # POSIX
+    shell = os.environ.get("SHELL", "").lower()
+    if "fish" in shell:
+        return "fish"
+    if "csh" in shell or "tcsh" in shell:
+        return "cshell"
+    if "nu" in shell or "nushell" in shell:
+        return "nushell"
+    return "bash"
+
+
+def emit_activation(venv: Path, shell: str) -> str:
+    """Generate activation command using virtualenv's activation plugin system."""
+    shell = shell.lower()
+    
+    # Map shell names to activator entry point names
+    shell_to_activator = {
+        "bash": "bash",
+        "zsh": "bash",  # zsh uses bash activator
+        "sh": "bash",   # sh uses bash activator
+        "fish": "fish",
+        "csh": "cshell",
+        "tcsh": "cshell",
+        "cshell": "cshell",
+        "nu": "nushell",
+        "nushell": "nushell",
+        "powershell": "powershell",
+        "pwsh": "powershell",
+        "cmd": "batch",
+        "batch": "batch",
+        "bat": "batch",
+    }
+    
+    activator_name = shell_to_activator.get(shell)
+    if not activator_name:
+        raise EnvonError(f"Unsupported shell: {shell}")
+    
+    # Try to use the plugin system to get proper script names
+    if PluginLoader:
+        try:
+            activators = PluginLoader.entry_points_for("virtualenv.activate")
+            if activator_name in activators:
+                activator_class = activators[activator_name]
+                
+                # Create a minimal mock creator to get script names
+                class MockCreator:
+                    def __init__(self, venv_path):
+                        self.dest = venv_path
+                        if (venv_path / "Scripts").exists():  # Windows
+                            self.bin_dir = venv_path / "Scripts"
+                        else:  # POSIX
+                            self.bin_dir = venv_path / "bin"
+                
+                mock_creator = MockCreator(venv)
+                
+                # Try to determine activation script name from the activator
+                try:
+                    # Create a temporary activator instance with minimal options
+                    class MockOptions:
+                        prompt = None
+                    
+                    activator = activator_class(MockOptions())
+                    
+                    # Get the templates to determine script names
+                    if hasattr(activator, 'templates'):
+                        for template in activator.templates():
+                            if hasattr(activator, 'as_name'):
+                                script_name = activator.as_name(template)
+                            else:
+                                script_name = template
+                            
+                            script_path = mock_creator.bin_dir / script_name
+                            if script_path.exists():
+                                return _generate_activation_command(script_path, shell)
+                except Exception:
+                    # Fall back to hardcoded approach if activator instantiation fails
+                    pass
+        except Exception:
+            # Fall back to hardcoded paths if plugin system fails
+            pass
+    
+    # Fallback: Use hardcoded script detection
+    return _emit_activation_fallback(venv, shell)
+
+
+def _generate_activation_command(script_path: Path, shell: str) -> str:
+    """Generate the appropriate activation command for the given script and shell."""
+    shell = shell.lower()
+    
+    if shell in {"bash", "zsh", "sh"}:
+        return f". '{script_path.as_posix()}'"
+    elif shell == "fish":
+        return f"source '{script_path.as_posix()}'"
+    elif shell in {"csh", "tcsh", "cshell"}:
+        return f"source '{script_path.as_posix()}'"
+    elif shell in {"nu", "nushell"}:
+        return f"overlay use '{script_path.as_posix()}'"
+    elif shell in {"powershell", "pwsh"}:
+        return f". '{script_path.as_posix()}'"
+    elif shell in {"cmd", "batch", "bat"}:
+        return f"call \"{script_path}\""
+    
+    raise EnvonError(f"Unknown shell command format for: {shell}")
+
+
+def _emit_activation_fallback(venv: Path, shell: str) -> str:
+    """Fallback activation detection using hardcoded paths."""
+    shell = shell.lower()
+    
+    if shell in {"bash", "zsh", "sh"}:
+        act = venv / "bin" / "activate"
+        if act.exists():
+            return f". '{act.as_posix()}'"
+    elif shell == "fish":
+        act = venv / "bin" / "activate.fish"
+        if act.exists():
+            return f"source '{act.as_posix()}'"
+    elif shell in {"csh", "tcsh", "cshell"}:
+        act = venv / "bin" / "activate.csh"
+        if act.exists():
+            return f"source '{act.as_posix()}'"
+    elif shell in {"nu", "nushell"}:
+        act = venv / "bin" / "activate.nu"
+        if act.exists():
+            return f"overlay use '{act.as_posix()}'"
+    elif shell in {"powershell", "pwsh"}:
+        act = venv / "Scripts" / "Activate.ps1"
+        if act.exists():
+            return f". '{act.as_posix()}'"
+    elif shell in {"cmd", "batch", "bat"}:
+        act = venv / "Scripts" / "activate.bat"
+        if act.exists():
+            return f"call \"{act}\""
+    
+    raise EnvonError(
+        f"No activation script found for shell '{shell}' in '{venv}'."
+    )
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="envon",
+        description="Emit the activation command for the nearest or specified virtual environment.",
+    )
+    p.add_argument("target", nargs="?", help="Path, project root, or name (searched in WORKON_HOME)")
+    p.add_argument("--emit", choices=[
+        "bash", "zsh", "sh", "fish", "cshell", "csh", "tcsh", "nushell", "nu", "powershell", "pwsh", "cmd", "batch", "bat",
+    ], help="Force shell output format")
+    p.add_argument("--print-path", action="store_true", help="Print resolved venv path (no activation)")
+    p.add_argument(
+        "--bootstrap",
+        choices=[
+            "bash", "zsh", "sh", "fish", "nushell", "nu", "powershell", "pwsh", "csh", "tcsh", "cshell",
+        ],
+        help="Print a shell wrapper that evaluates envon's output so 'envon' directly activates the venv.",
+    )
+    return p.parse_args(argv)
+
+
+def emit_bootstrap(shell: str) -> str:
+    s = shell.lower()
+    if s in {"bash", "zsh", "sh"}:
+        return (
+            "envon() {\n"
+            "  local cmd;\n"
+            "  cmd=\"$(command envon --emit bash \"$@\")\" || { echo \"$cmd\" >&2; return 1; };\n"
+            "  eval \"$cmd\";\n"
+            "}\n"
+        )
+    if s == "fish":
+        return (
+            "function envon\n"
+            "    set cmd (command envon --emit fish $argv)\n"
+            "    if test $status -ne 0\n"
+            "        echo $cmd >&2\n"
+            "        return 1\n"
+            "    end\n"
+            "    eval $cmd\n"
+            "end\n"
+        )
+    if s in {"nushell", "nu"}:
+        return (
+            "def-env envon [...args] {\n"
+            "  let cmd = (^envon --emit nushell ...$args)\n"
+            "  overlay use $cmd\n"
+            "}\n"
+        )
+    if s in {"powershell", "pwsh"}:
+        return (
+            "function envon {\n"
+            "  param([Parameter(Position=0)][string]$Target)\n"
+            "  $argsList = @(); if ($Target) { $argsList += $Target }\n"
+            "  $envonExe = Get-Command envon -CommandType Application -ErrorAction SilentlyContinue\n"
+            "  if (-not $envonExe) { Write-Error 'envon console script not found on PATH'; return }\n"
+            "  $cmd = & $envonExe.Source --emit powershell @argsList\n"
+            "  if ($LASTEXITCODE -ne 0) { Write-Error $cmd; return }\n"
+            "  Invoke-Expression $cmd\n"
+            "}\n"
+        )
+    if s in {"csh", "tcsh", "cshell"}:
+        # csh alias that forwards args, captures output, and evals it
+        # Note: users may need to add this to their ~/.cshrc
+        return (
+            "alias envon 'set _ev=`envon --emit csh \\!*` && eval $_ev && unset _ev'\n"
+        )
+    raise EnvonError(f"Unsupported shell for bootstrap: {shell}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ns = parse_args(argv or sys.argv[1:])
+    try:
+        if ns.bootstrap:
+            print(emit_bootstrap(ns.bootstrap))
+            return 0
+        venv = resolve_target(ns.target)
+        if ns.print_path:
+            print(str(venv))
+            return 0
+        shell = detect_shell(ns.emit)
+        cmd = emit_activation(venv, shell)
+        print(cmd)
+        return 0
+    except EnvonError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

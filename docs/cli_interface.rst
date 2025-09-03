@@ -135,3 +135,231 @@ The equivalent CLI-flags based invocation for the above examples would be:
 
    virtualenv --python=/opt/python-3.8/bin/python --python=python3.8
    virtualenv --extra-search-dir=/path/to/dists --extra-search-dir=/path/to/other/dists
+
+
+.. _envon_cli:
+
+envon - Virtual Environment Activator
+======================================
+
+``envon`` is a companion CLI tool that simplifies virtual environment activation across different shells.
+Instead of remembering different activation commands for different shells and platforms, ``envon`` provides
+a unified interface to locate and activate virtual environments.
+
+Basic Usage
+~~~~~~~~~~~
+
+Find and activate the nearest virtual environment:
+
+.. code-block:: console
+
+   $ envon
+   . '/path/to/project/.venv/bin/activate'
+
+The command outputs the appropriate activation command for your current shell. To actually activate the environment,
+you need to evaluate the output:
+
+.. code-block:: console
+
+   $ eval "$(envon)"
+
+Or use the shell-specific bootstrap function (recommended - see :ref:`envon_bootstrap`).
+
+Command Options
+~~~~~~~~~~~~~~~
+
+.. code-block:: console
+
+   envon [target] [options]
+
+**Arguments:**
+
+* ``target`` (optional): Path to virtual environment, project directory, or environment name in ``WORKON_HOME``
+
+**Options:**
+
+* ``--emit SHELL``: Force output format for specific shell (bash, fish, powershell, cmd, etc.)
+* ``--print-path``: Print the resolved virtual environment path instead of activation command
+* ``--bootstrap SHELL``: Generate shell wrapper function for direct activation
+
+Examples
+~~~~~~~~
+
+**Basic usage - find nearest environment:**
+
+.. code-block:: console
+
+   $ envon
+   . '/home/user/myproject/.venv/bin/activate'
+
+**Specify a target:**
+
+.. code-block:: console
+
+   $ envon /path/to/my/venv
+   . '/path/to/my/venv/bin/activate'
+
+   $ envon myproject-env  # looks in $WORKON_HOME
+   . '/home/user/.virtualenvs/myproject-env/bin/activate'
+
+**Force shell format:**
+
+.. code-block:: console
+
+   $ envon --emit fish
+   source '/home/user/myproject/.venv/bin/activate.fish'
+
+   $ envon --emit powershell
+   . '/home/user/myproject/.venv/Scripts/Activate.ps1'
+
+**Get environment path only:**
+
+.. code-block:: console
+
+   $ envon --print-path
+   /home/user/myproject/.venv
+
+Virtual Environment Discovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``envon`` uses intelligent discovery to find virtual environments:
+
+1. **No target specified:**
+
+   - First checks current directory for common names: ``.venv``, ``venv``, ``env``, ``.env``
+   - If multiple found, prompts for selection (in interactive mode)
+   - Falls back to searching parent directories
+
+2. **Target specified:**
+
+   - If it's a path to a virtual environment, uses it directly
+   - If it's a directory containing virtual environments, lists and selects
+   - If it's a name, searches in ``$WORKON_HOME``
+
+3. **Detection criteria:**
+
+   - Presence of ``pyvenv.cfg`` file (most reliable)
+   - Existence of activation scripts (``bin/activate``, ``Scripts/activate.bat``, etc.)
+
+.. _envon_bootstrap:
+
+Shell Integration (Bootstrap)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For the best experience, add ``envon`` wrapper functions to your shell configuration.
+These allow ``envon`` to directly activate environments instead of just printing commands.
+
+**Bash/Zsh (.bashrc, .zshrc):**
+
+.. code-block:: bash
+
+   # Add this to your .bashrc or .zshrc
+   eval "$(envon --bootstrap bash)"
+
+   # Or manually add the function:
+   envon() {
+     local cmd;
+     cmd="$(command envon --emit bash "$@")" || { echo "$cmd" >&2; return 1; };
+     eval "$cmd";
+   }
+
+**Fish (~/.config/fish/config.fish):**
+
+.. code-block:: fish
+
+   # Add this to your config.fish
+   envon --bootstrap fish | source
+
+   # Or manually add the function:
+   function envon
+       set cmd (command envon --emit fish $argv)
+       if test $status -ne 0
+           echo $cmd >&2
+           return 1
+       end
+       eval $cmd
+   end
+
+**PowerShell ($PROFILE):**
+
+.. code-block:: powershell
+
+   # Add this to your PowerShell profile
+   Invoke-Expression (envon --bootstrap powershell)
+
+   # Or manually add the function:
+   function envon {
+     param([Parameter(Position=0)][string]$Target)
+     $argsList = @(); if ($Target) { $argsList += $Target }
+     $envonExe = Get-Command envon -CommandType Application -ErrorAction SilentlyContinue
+     if (-not $envonExe) { Write-Error 'envon console script not found on PATH'; return }
+     $cmd = & $envonExe.Source --emit powershell @argsList
+     if ($LASTEXITCODE -ne 0) { Write-Error $cmd; return }
+     Invoke-Expression $cmd
+   }
+
+**Nushell (~/.config/nushell/config.nu):**
+
+.. code-block:: nu
+
+   # Add this to your config.nu
+   source (envon --bootstrap nushell | str trim)
+
+   # Or manually add the function:
+   def-env envon [...args] {
+     let cmd = (^envon --emit nushell ...$args)
+     overlay use $cmd
+   }
+
+**C Shell (.cshrc):**
+
+.. code-block:: csh
+
+   # Add this to your .cshrc
+   eval "`envon --bootstrap csh`"
+
+   # Or manually add the alias:
+   alias envon 'set _ev=`envon --emit csh \!*` && eval $_ev && unset _ev'
+
+Shell Support
+~~~~~~~~~~~~~
+
+``envon`` supports activation for all shells that virtualenv supports:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * - Shell
+     - Platform
+     - Activation Command Generated
+   * - Bash/Zsh/Sh
+     - POSIX
+     - ``. 'path/to/activate'``
+   * - Fish
+     - POSIX
+     - ``source 'path/to/activate.fish'``
+   * - C Shell (csh/tcsh)
+     - POSIX
+     - ``source 'path/to/activate.csh'``
+   * - Nushell
+     - Cross-platform
+     - ``overlay use 'path/to/activate.nu'``
+   * - PowerShell
+     - Windows/Cross-platform
+     - ``. 'path/to/Activate.ps1'``
+   * - CMD/Batch
+     - Windows
+     - ``call "path/to/activate.bat"``
+
+Integration with virtualenvwrapper
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``envon`` is compatible with ``virtualenvwrapper`` environments. Set the ``WORKON_HOME`` environment variable,
+and ``envon`` will search for environments by name:
+
+.. code-block:: console
+
+   $ export WORKON_HOME="$HOME/.virtualenvs"
+   $ envon myproject
+   . '/home/user/.virtualenvs/myproject/bin/activate'
