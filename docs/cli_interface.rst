@@ -181,6 +181,7 @@ Command Options
 * ``--emit SHELL``: Force output format for specific shell (bash, fish, powershell, cmd, etc.)
 * ``--print-path``: Print the resolved virtual environment path instead of activation command
 * ``--bootstrap SHELL``: Generate shell wrapper function for direct activation
+* ``--install SHELL``: Automatically install bootstrap function to shell configuration file
 
 Examples
 ~~~~~~~~
@@ -219,6 +220,14 @@ Examples
    $ envon --print-path
    /home/user/myproject/.venv
 
+**Install bootstrap function automatically:**
+
+.. code-block:: console
+
+   $ envon --install bash
+   envon bootstrap function installed to /home/user/.bashrc
+   Restart your shell or run: source /home/user/.bashrc
+
 Virtual Environment Discovery
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -248,6 +257,31 @@ Shell Integration (Bootstrap)
 
 For the best experience, add ``envon`` wrapper functions to your shell configuration.
 These allow ``envon`` to directly activate environments instead of just printing commands.
+
+**Quick Setup (Automatic Installation):**
+
+For convenience, ``envon`` can automatically add the bootstrap function to your shell configuration:
+
+.. code-block:: console
+
+   # Automatically install to bash/zsh configuration
+   $ envon --install bash
+   envon bootstrap function installed to /home/user/.bashrc
+   Restart your shell or run: source /home/user/.bashrc
+
+   # Automatically install to fish configuration  
+   $ envon --install fish
+   envon bootstrap function installed to /home/user/.config/fish/config.fish
+   Restart your shell or run: source /home/user/.config/fish/config.fish
+
+   # Automatically install to PowerShell configuration
+   $ envon --install powershell
+   envon bootstrap function installed to /home/user/Documents/PowerShell/Microsoft.PowerShell_profile.ps1
+   Restart your shell or run: . $PROFILE
+
+**Manual Setup:**
+
+Alternatively, you can manually add the bootstrap function to your shell configuration:
 
 **Bash/Zsh (.bashrc, .zshrc):**
 

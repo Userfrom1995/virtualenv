@@ -345,12 +345,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ],
         help="Print a shell wrapper that evaluates envon's output so 'envon' directly activates the venv.",
     )
+    p.add_argument(
+        "--install",
+        choices=[
+            "bash", "zsh", "sh", "fish", "nushell", "nu", "powershell", "pwsh", "csh", "tcsh", "cshell",
+        ],
+        help="Install envon bootstrap function directly to shell configuration file.",
+    )
     return p.parse_args(argv)
 
 
 def emit_bootstrap(shell: str) -> str:
+    """Generate the bootstrap function for the given shell."""
     s = shell.lower()
     if s in {"bash", "zsh", "sh"}:
+        print("DEBUG: Generating bootstrap for bash/zsh/sh", file=sys.stderr)
         return (
             "envon() {\n"
             "  local cmd;\n"
@@ -397,11 +406,97 @@ def emit_bootstrap(shell: str) -> str:
     raise EnvonError(f"Unsupported shell for bootstrap: {shell}")
 
 
+def get_shell_config_path(shell: str) -> Path:
+    """Get the configuration file path for a given shell."""
+    shell = shell.lower()
+    home = Path.home()
+    
+    if shell in {"bash", "sh"}:
+        # Try .bashrc first, fall back to .bash_profile
+        bashrc = home / ".bashrc"
+        if bashrc.exists():
+            return bashrc
+        return home / ".bash_profile"
+    elif shell == "zsh":
+        return home / ".zshrc"
+    elif shell == "fish":
+        config_dir = home / ".config" / "fish"
+        return config_dir / "config.fish"
+    elif shell in {"nushell", "nu"}:
+        if os.name == "nt":  # Windows
+            config_dir = Path(os.environ.get("APPDATA", home)) / "nushell"
+        else:  # POSIX
+            config_dir = home / ".config" / "nushell"
+        return config_dir / "config.nu"
+    elif shell in {"powershell", "pwsh"}:
+        if os.name == "nt":  # Windows
+            # Get PowerShell profile path
+            documents = Path.home() / "Documents"
+            if shell == "pwsh":  # PowerShell Core
+                return documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+            else:  # Windows PowerShell
+                return documents / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+        else:  # POSIX PowerShell Core
+            return home / ".config" / "powershell" / "Microsoft.PowerShell_profile.ps1"
+    elif shell in {"csh", "tcsh", "cshell"}:
+        if shell == "tcsh":
+            return home / ".tcshrc"
+        return home / ".cshrc"
+    
+    raise EnvonError(f"Unknown shell configuration path for: {shell}")
+
+
+def install_bootstrap(shell: str) -> str:
+    """Install envon bootstrap function to shell configuration file."""
+    shell = shell.lower()
+    config_path = get_shell_config_path(shell)
+    
+    # Ensure parent directory exists
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get the bootstrap content
+    if shell in {"bash", "zsh", "sh"}:
+        content = '\n# envon bootstrap function (added by envon --install)\neval "$(envon --bootstrap bash)"\n'
+    elif shell == "fish":
+        content = '\n# envon bootstrap function (added by envon --install)\nenvon --bootstrap fish | source\n'
+    elif shell in {"nushell", "nu"}:
+        content = '\n# envon bootstrap function (added by envon --install)\nsource (envon --bootstrap nushell | str trim)\n'
+    elif shell in {"powershell", "pwsh"}:
+        content = '\n# envon bootstrap function (added by envon --install)\nInvoke-Expression (envon --bootstrap powershell)\n'
+    elif shell in {"csh", "tcsh", "cshell"}:
+        content = '\n# envon bootstrap function (added by envon --install)\neval "`envon --bootstrap csh`"\n'
+    else:
+        raise EnvonError(f"Unsupported shell for installation: {shell}")
+    
+    # Check if already installed
+    if config_path.exists():
+        existing_content = config_path.read_text()
+        if "envon --bootstrap" in existing_content or "envon bootstrap function" in existing_content:
+            return f"envon bootstrap function already installed in {config_path}"
+    
+    # Append to configuration file
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write(content)
+    
+    return f"envon bootstrap function installed to {config_path}\nRestart your shell or run: source {config_path}"
+
+
 def main(argv: list[str] | None = None) -> int:
     ns = parse_args(argv or sys.argv[1:])
     try:
         if ns.bootstrap:
+            # print(f"DEBUG: sys.stdout is {sys.stdout!r}", file=sys.stderr)
+            # data = emit_bootstrap(ns.bootstrap)
+            # print(f"DEBUG: bootstrap length {len(data)}", file=sys.stderr)
             print(emit_bootstrap(ns.bootstrap))
+           # os.write(1, emit_bootstrap(ns.bootstrap).encode())
+            # print(f"DEBUG: bootstrap repr {data!r}", file=sys.stderr)
+
+            # print("DEBUG: printed bootstrap function", file=sys.stderr)
+            return 0
+        if ns.install:
+            result = install_bootstrap(ns.install)
+            print(result)
             return 0
         venv = resolve_target(ns.target)
         if ns.print_path:
