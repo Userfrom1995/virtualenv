@@ -300,7 +300,7 @@ These allow ``envon`` to directly activate environments instead of just printing
 
 **Nushell (~/.config/nushell/config.nu):**
 
-.. code-block:: nu
+.. code-block:: shell
 
    # Add this to your config.nu
    source (envon --bootstrap nushell | str trim)
