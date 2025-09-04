@@ -229,7 +229,11 @@ def emit_activation(venv: Path, shell: str) -> str:
     
     activator_name = shell_to_activator.get(shell)
     if not activator_name:
-        raise EnvonError(f"Unsupported shell: {shell}")
+        supported = ", ".join(sorted(shell_to_activator.keys()))
+        raise EnvonError(
+            f"Unsupported shell: {shell}. Supported shells: {supported}. "
+            f"Specify --emit <shell> explicitly or omit --emit to auto-detect."
+        )
     
     # Try to use the plugin system to get proper script names
     if PluginLoader:
@@ -329,7 +333,8 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
             return f"call \"{act}\""
     
     raise EnvonError(
-        f"No activation script found for shell '{shell}' in '{venv}'."
+        f"No activation script found for shell '{shell}' in '{venv}'. "
+        "Try specifying --emit explicitly, or ensure the virtualenv's activation scripts exist."
     )
 
 
@@ -339,23 +344,39 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Emit the activation command for the nearest or specified virtual environment.",
     )
     p.add_argument("target", nargs="?", help="Path, project root, or name (searched in WORKON_HOME)")
-    p.add_argument("--emit", choices=[
-        "bash", "zsh", "sh", "fish", "cshell", "csh", "tcsh", "nushell", "nu", "powershell", "pwsh", "cmd", "batch", "bat",
-    ], help="Force shell output format")
+    # --emit: optional SHELL argument; if omitted, auto-detect current shell
+    p.add_argument(
+        "--emit",
+        nargs="?",
+        const="",
+        metavar="SHELL",
+        help=(
+            "Emit activation command. If SHELL is omitted, auto-detect. "
+            "Supported: bash, zsh, sh, fish, cshell/csh/tcsh, nushell/nu, powershell/pwsh, cmd/batch/bat"
+        ),
+    )
     p.add_argument("--print-path", action="store_true", help="Print resolved venv path (no activation)")
+    # --bootstrap: optional SHELL argument; if omitted, auto-detect current shell
     p.add_argument(
         "--bootstrap",
-        choices=[
-            "bash", "zsh", "sh", "fish", "nushell", "nu", "powershell", "pwsh", "csh", "tcsh", "cshell",
-        ],
-        help="Print a shell wrapper that evaluates envon's output so 'envon' directly activates the venv.",
+        nargs="?",
+        const="",
+        metavar="SHELL",
+        help=(
+            "Print a shell wrapper that evaluates envon's output so 'envon' directly activates the venv. "
+            "If SHELL is omitted, auto-detect."
+        ),
     )
+    # --install: optional SHELL argument; if omitted, auto-detect current shell
     p.add_argument(
         "--install",
-        choices=[
-            "bash", "zsh", "sh", "fish", "nushell", "nu", "powershell", "pwsh", "csh", "tcsh", "cshell",
-        ],
-        help="Install envon bootstrap function directly to shell configuration file.",
+        nargs="?",
+        const="",
+        metavar="SHELL",
+        help=(
+            "Install envon bootstrap function directly to shell configuration file. "
+            "If SHELL is omitted, auto-detect."
+        ),
     )
     return p.parse_args(argv)
 
@@ -482,8 +503,9 @@ def get_shell_config_path(shell: str) -> Path:
     raise EnvonError(f"Unknown shell configuration path for: {shell}")
 
 
-def install_bootstrap(shell: str) -> str:
+def install_bootstrap(shell: str | None) -> str:
     """Install envon bootstrap function to shell configuration file."""
+    shell = detect_shell(shell)  # auto-detect when None or empty string
     shell = shell.lower()
     config_path = get_shell_config_path(shell)
     
@@ -503,7 +525,11 @@ def install_bootstrap(shell: str) -> str:
         "csh" if shell in {"csh", "tcsh", "cshell"} else None
     )
     if target_shell is None:
-        raise EnvonError(f"Unsupported shell for installation: {shell}")
+        supported = "bash, zsh, sh, fish, nushell, nu, powershell, pwsh, csh, tcsh, cshell"
+        raise EnvonError(
+            f"Unsupported shell for installation: {shell}. Supported: {supported}. "
+            f"Specify '--install <shell>' explicitly or run 'envon --bootstrap <shell>' and source it manually."
+        )
     content = _managed_content_for_shell(target_shell)
     _write_managed_if_changed(managed_file, content)
 
@@ -635,10 +661,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Opportunistic refresh of managed bootstrap (no-op if not installed)
         _maybe_update_managed_current_shell(ns.emit)
-        if ns.bootstrap:
-            print(emit_bootstrap(ns.bootstrap))
+        if ns.bootstrap is not None:
+            bs_shell = detect_shell(ns.bootstrap)
+            print(emit_bootstrap(bs_shell))
             return 0
-        if ns.install:
+        if ns.install is not None:
             result = install_bootstrap(ns.install)
             print(result)
             return 0
