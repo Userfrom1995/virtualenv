@@ -636,14 +636,7 @@ def main(argv: list[str] | None = None) -> int:
         # Opportunistic refresh of managed bootstrap (no-op if not installed)
         _maybe_update_managed_current_shell(ns.emit)
         if ns.bootstrap:
-            # print(f"DEBUG: sys.stdout is {sys.stdout!r}", file=sys.stderr)
-            # data = emit_bootstrap(ns.bootstrap)
-            # print(f"DEBUG: bootstrap length {len(data)}", file=sys.stderr)
             print(emit_bootstrap(ns.bootstrap))
-           # os.write(1, emit_bootstrap(ns.bootstrap).encode())
-            # print(f"DEBUG: bootstrap repr {data!r}", file=sys.stderr)
-
-            # print("DEBUG: printed bootstrap function", file=sys.stderr)
             return 0
         if ns.install:
             result = install_bootstrap(ns.install)
