@@ -346,12 +346,11 @@ def _generate_activation_command(script_path: Path, shell: str) -> str:
         return f". '{script_path.as_posix()}'"
     elif shell == "fish":
         return f"source '{script_path.as_posix()}'"
-    elif shell in {"csh", "tcsh", "cshell"}:
-        return f"source '{script_path.as_posix()}'"
+    if shell in {"csh", "tcsh", "cshell"}:
+        return f"source {script_path.as_posix()}"
     elif shell in {"nu", "nushell"}:
-        # Emit Nushell overlay command; the bootstrap evaluates it via run-string
-        p = script_path.as_posix().replace('"', '\\"')
-        return f"overlay use \"{p}\""
+        # For Nushell we only print the overlay use on the activation script path.
+        return f"overlay use \"{script_path.as_posix()}\""
     elif shell in {"powershell", "pwsh"}:
         return f". '{script_path.as_posix()}'"
     elif shell in {"cmd", "batch", "bat"}:
@@ -375,15 +374,17 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
     elif shell in {"csh", "tcsh", "cshell"}:
         act = venv / "bin" / "activate.csh"
         if act.exists():
-            return f"source '{act.as_posix()}'"
+            return f"source {act.as_posix()}"
     elif shell in {"nu", "nushell"}:
-        act = venv / "bin" / "activate.nu"
-        if act.exists():
-            p = act.as_posix().replace('"', '\\"')
-            return f"overlay use \"{p}\""
+        # Check for activate.nu in both Windows and POSIX locations and print overlay use on it.
+        act_posix = venv / "bin" / "activate.nu"
+        act_windows = venv / "Scripts" / "activate.nu"
+        act = act_posix if act_posix.exists() else act_windows if act_windows.exists() else None
+        if act and act.exists():
+            return f"overlay use \"{act.as_posix()}\""
         raise EnvonError(
-            f"Virtual environment '{venv}' does not support Nushell activation: 'bin/activate.nu' is missing. "
-            "Recreate or upgrade the environment with a tool that generates Nushell activation scripts, "
+            f"Virtual environment '{venv}' does not support Nushell activation: 'activate.nu' is missing. "
+            "Create or upgrade the environment with a tool that generates Nushell activation scripts, "
             "or use a different shell (bash/zsh/fish)."
         )
     elif shell in {"powershell", "pwsh"}:
@@ -401,7 +402,7 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
     )
 
 
-## Nushell: no wrapper files are generated; we emit overlay commands and evaluate them in bootstrap.
+## Nushell: uses overlay use on activate.nu directly
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -503,20 +504,30 @@ def emit_bootstrap(shell: str) -> str:
             "    eval $cmd\n"
             "end\n"
         )
-    
+
     if s in {"nushell", "nu"}:
-        # Evaluate emitted Nushell code so activation affects the current session
+        # Emit a Nushell function that prints the overlay command for the venv's activate.nu
+        # or a helpful warning if the activation script isn't present.
         return (
             "def --env envon [...args] {\n"
             "  if ($args | is-empty) == false {\n"
             "    let first = ($args | first)\n"
-            "    if $first == '--' { let args = ($args | skip 1); command envon $args; return }\n"
+            "    if $first == '--' { let args = ($args | skip 1); ^envon ...$args; return }\n"
             "    if ($first == 'help') or ($first == '-h') or ($first == '--help') or (($first | str starts-with '-') == true) {\n"
-            "      command envon $args; return\n"
+            "      ^envon ...$args; return\n"
             "    }\n"
             "  }\n"
-            "  let cmd = (^envon --emit nushell ...$args)\n"
-            "  run-string $cmd\n"
+            "  let venv = (^envon --print-path ...$args | str trim)\n"
+            "  if ($venv | is-empty) { return }\n"
+            "  let is_windows = ($nu.os-info.name == 'windows')\n"
+            "  let act = (if $is_windows { ($venv | path join 'Scripts' 'activate.nu') } else { ($venv | path join 'bin' 'activate.nu') })\n"
+            "  if ($act | path exists) {\n"
+            "    echo $\"overlay use '($act | path expand)'\"\n"
+            "    echo 'Run the printed command in your interactive shell to activate the virtual environment.'\n"
+            "    return\n"
+            "  }\n"
+            "  echo 'Nushell activation script (activate.nu) not found for this virtual environment.'\n"
+            "  echo 'Create or upgrade the environment with a tool that generates Nushell activation scripts.'\n"
             "}\n"
         )
 
@@ -538,11 +549,15 @@ def emit_bootstrap(shell: str) -> str:
             "}\n"
         )
     if s in {"csh", "tcsh", "cshell"}:
-        # csh alias that forwards args, captures output, and evals it
-        # Note: users may need to add this to their ~/.cshrc
+    # csh/tcsh bootstrap alias with guarded behavior:
+    # - Forward flags/help directly to external envon (no eval)
+    # - Evaluate activation only when args look like targets
+    # - Use \envon to bypass alias recursion
+    # Note: users may need to add this to ~/.cshrc (csh) or ~/.tcshrc (tcsh)
         return (
-            "alias envon 'set _ev=`envon --emit csh \\!*` && eval $_ev && unset _ev'\n"
+            "alias envon 'set _ev=`\\envon --emit csh \\!*` && eval $_ev && unset _ev'\n"
         )
+
     raise EnvonError(f"Unsupported shell for bootstrap: {shell}")
 
 
@@ -660,6 +675,25 @@ def get_managed_bootstrap_path(shell: str) -> Path:
     if name is None:
         raise EnvonError(f"Unsupported shell: {shell}")
     return envon_dir / name
+
+
+# def get_nushell_venv_path() -> Path:
+#     """Return the path to the managed Nushell venv.nu file."""
+#     if os.name == "nt":
+#         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+#     else:
+#         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+#     envon_dir = base / "envon"
+#     return envon_dir / "venv.nu"
+
+
+# def _ensure_nushell_venv_file() -> None:
+#     """Ensure the managed Nushell venv.nu file and parent dir exist."""
+#     venv_path = get_nushell_venv_path()
+#     venv_path.parent.mkdir(parents=True, exist_ok=True)
+#     if not venv_path.exists():
+#         # create a placeholder file that will be overwritten on activation
+#         venv_path.write_text("# envon venv.nu - will be overwritten when activating environments\n", encoding="utf-8")
 
 
 def _write_managed_if_changed(path: Path, content: str) -> None:

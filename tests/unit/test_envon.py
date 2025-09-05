@@ -355,6 +355,13 @@ class TestBootstrap:
         assert "function envon {" in result
         assert "Invoke-Expression $cmd" in result
 
+    def test_nushell_bootstrap(self):
+        """Test Nushell bootstrap function generation."""
+        result = emit_bootstrap("nushell")
+        assert "def --env envon" in result
+        assert "overlay use" in result
+        assert "overlay use $act" in result
+
     def test_unsupported_shell_bootstrap(self):
         """Test error for unsupported shell bootstrap."""
         with pytest.raises(EnvonError, match="Unsupported shell for bootstrap"):
