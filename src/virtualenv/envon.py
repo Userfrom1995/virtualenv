@@ -159,6 +159,10 @@ def resolve_target(target: str | None) -> Path:
         # Fallback to walking upwards to find a named venv (e.g., project/.venv)
         venv = find_nearest_venv(cwd)
         if not venv:
+            # Fallback: if a virtual environment is already active, respect it
+            ve = os.environ.get("VIRTUAL_ENV")
+            if ve and is_venv_dir(Path(ve)):
+                return Path(ve)
             raise EnvonError("No virtual environment found here. Create one (e.g., '.venv') or pass a path.")
         return venv
 
@@ -189,19 +193,70 @@ def detect_shell(explicit: str | None) -> str:
 
     # Heuristics by platform/env
     if os.name == "nt":
-        # Prefer powershell if detected
-        parent_proc = os.environ.get("PSModulePath") or os.environ.get("PROMPT")
-        if parent_proc and "PSModulePath" in os.environ:
+        # Prefer PowerShell if available, else default to cmd
+        if "PSModulePath" in os.environ:
             return "powershell"
         return "cmd"
     # POSIX
+    # 1) Environment variables set by the shell itself (most reliable when present)
+    if os.environ.get("ZSH_VERSION"):
+        return "zsh"
+    if os.environ.get("BASH_VERSION"):
+        return "bash"
+    if os.environ.get("FISH_VERSION"):
+        return "fish"
+    # nushell does not (always) export a dedicated var; try a common one if present
+    if os.environ.get("NU_VERSION"):
+        return "nushell"
+
+    # 2) Inspect parent process (the shell) via /proc when available (Linux/WSL)
+    try:
+        ppid = os.getppid()
+        proc_comm = Path("/proc") / str(ppid) / "comm"
+        name = ""
+        if proc_comm.exists():
+            try:
+                name = proc_comm.read_text(encoding="utf-8").strip().lower()
+            except Exception:
+                name = ""
+        if not name:
+            proc_exe = Path("/proc") / str(ppid) / "exe"
+            if proc_exe.exists():
+                try:
+                    name = os.path.basename(os.readlink(proc_exe)).lower()
+                except Exception:
+                    name = ""
+        if name:
+            # Normalize common names
+            if "zsh" in name:
+                return "zsh"
+            if name in {"bash", "sh"} or "bash" in name:
+                return "bash" if "bash" in name else "sh"
+            if "fish" in name:
+                return "fish"
+            if name in {"csh", "tcsh"} or "csh" in name or "tcsh" in name:
+                return "cshell"
+            if "nu" in name:
+                return "nushell"
+            if name in {"pwsh", "powershell"}:
+                return "powershell"
+            if name in {"cmd", "cmd.exe"}:
+                return "cmd"
+    except Exception:
+        pass
+
+    # 3) Fallback to $SHELL login shell
     shell = os.environ.get("SHELL", "").lower()
+    if "zsh" in shell:
+        return "zsh"
     if "fish" in shell:
         return "fish"
     if "csh" in shell or "tcsh" in shell:
         return "cshell"
     if "nu" in shell or "nushell" in shell:
         return "nushell"
+    if shell.endswith("sh") and "bash" not in shell:
+        return "sh"
     return "bash"
 
 
@@ -218,8 +273,8 @@ def emit_activation(venv: Path, shell: str) -> str:
         "csh": "cshell",
         "tcsh": "cshell",
         "cshell": "cshell",
-        "nu": "nushell",
-        "nushell": "nushell",
+            "nu": "nushell",  # Map nushell to its activator
+            "nushell": "nushell",  # Map nushell to its activator
         "powershell": "powershell",
         "pwsh": "powershell",
         "cmd": "batch",
@@ -294,7 +349,9 @@ def _generate_activation_command(script_path: Path, shell: str) -> str:
     elif shell in {"csh", "tcsh", "cshell"}:
         return f"source '{script_path.as_posix()}'"
     elif shell in {"nu", "nushell"}:
-        return f"overlay use '{script_path.as_posix()}'"
+        # Emit Nushell overlay command; the bootstrap evaluates it via run-string
+        p = script_path.as_posix().replace('"', '\\"')
+        return f"overlay use \"{p}\""
     elif shell in {"powershell", "pwsh"}:
         return f". '{script_path.as_posix()}'"
     elif shell in {"cmd", "batch", "bat"}:
@@ -322,7 +379,13 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
     elif shell in {"nu", "nushell"}:
         act = venv / "bin" / "activate.nu"
         if act.exists():
-            return f"overlay use '{act.as_posix()}'"
+            p = act.as_posix().replace('"', '\\"')
+            return f"overlay use \"{p}\""
+        raise EnvonError(
+            f"Virtual environment '{venv}' does not support Nushell activation: 'bin/activate.nu' is missing. "
+            "Recreate or upgrade the environment with a tool that generates Nushell activation scripts, "
+            "or use a different shell (bash/zsh/fish)."
+        )
     elif shell in {"powershell", "pwsh"}:
         act = venv / "Scripts" / "Activate.ps1"
         if act.exists():
@@ -336,6 +399,9 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
         f"No activation script found for shell '{shell}' in '{venv}'. "
         "Try specifying --emit explicitly, or ensure the virtualenv's activation scripts exist."
     )
+
+
+## Nushell: no wrapper files are generated; we emit overlay commands and evaluate them in bootstrap.
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -384,7 +450,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def emit_bootstrap(shell: str) -> str:
     """Generate the bootstrap function for the given shell."""
     s = shell.lower()
-    if s in {"bash", "zsh", "sh"}:
+    if s in {"bash", "zsh"}:
         # Forward CLI flags to the real envon, only eval activation when args look like targets
         return (
             "envon() {\n"
@@ -396,7 +462,23 @@ def emit_bootstrap(shell: str) -> str:
             "    esac\n"
             "  fi\n"
             "  local cmd ec;\n"
-            "  cmd=\"$(command envon --emit bash \"$@\")\"; ec=$?\n"
+            f"  cmd=\"$(command envon --emit {s} \"$@\")\"; ec=$?\n"
+            "  if [ $ec -ne 0 ]; then printf %s\\n \"$cmd\" >&2; return $ec; fi\n"
+            "  eval \"$cmd\";\n"
+            "}\n"
+        )
+    if s == "sh":
+        # POSIX-compliant variant (avoid 'local')
+        return (
+            "envon() {\n"
+            "  if [ \"$#\" -gt 0 ]; then\n"
+            "    case \"$1\" in\n"
+            "      --) shift ;;\n"
+            "      help|-h|--help) command envon \"$@\"; return $? ;;\n"
+            "      -*) command envon \"$@\"; return $? ;;\n"
+            "    esac\n"
+            "  fi\n"
+            "  cmd=$(command envon --emit sh \"$@\"); ec=$?\n"
             "  if [ $ec -ne 0 ]; then printf %s\\n \"$cmd\" >&2; return $ec; fi\n"
             "  eval \"$cmd\";\n"
             "}\n"
@@ -421,22 +503,23 @@ def emit_bootstrap(shell: str) -> str:
             "    eval $cmd\n"
             "end\n"
         )
+    
     if s in {"nushell", "nu"}:
+        # Evaluate emitted Nushell code so activation affects the current session
         return (
-            "def-env envon [...args] {\n"
+            "def --env envon [...args] {\n"
             "  if ($args | is-empty) == false {\n"
-            "    let first = ($args | get 0)\n"
-            "    if ($first == \"--\") {\n"
-            "      $args = ($args | skip 1)\n"
-            "    } else if ($first in [help] or ($first | str starts-with '-')) {\n"
-            "      ^envon ...$args\n"
-            "      return\n"
+            "    let first = ($args | first)\n"
+            "    if $first == '--' { let args = ($args | skip 1); command envon $args; return }\n"
+            "    if ($first == 'help') or ($first == '-h') or ($first == '--help') or (($first | str starts-with '-') == true) {\n"
+            "      command envon $args; return\n"
             "    }\n"
             "  }\n"
             "  let cmd = (^envon --emit nushell ...$args)\n"
-            "  overlay use $cmd\n"
+            "  run-string $cmd\n"
             "}\n"
         )
+
     if s in {"powershell", "pwsh"}:
         return (
             "function envon {\n"
@@ -468,12 +551,16 @@ def get_shell_config_path(shell: str) -> Path:
     shell = shell.lower()
     home = Path.home()
     
-    if shell in {"bash", "sh"}:
+    if shell == "bash":
         # Try .bashrc first, fall back to .bash_profile
         bashrc = home / ".bashrc"
         if bashrc.exists():
             return bashrc
         return home / ".bash_profile"
+    if shell == "sh":
+        # POSIX sh typically sources ~/.profile (login shells); there is no standard per-shell rc
+        # We choose ~/.profile as the install target.
+        return home / ".profile"
     elif shell == "zsh":
         return home / ".zshrc"
     elif shell == "fish":
@@ -518,7 +605,9 @@ def install_bootstrap(shell: str | None) -> str:
     
     # Generate function content for the managed file
     target_shell = (
-        "bash" if shell in {"bash", "zsh", "sh"} else
+        "bash" if shell == "bash" else
+        "zsh" if shell == "zsh" else
+        "sh" if shell == "sh" else
         "fish" if shell == "fish" else
         "nushell" if shell in {"nushell", "nu"} else
         "powershell" if shell in {"powershell", "pwsh"} else
@@ -535,9 +624,13 @@ def install_bootstrap(shell: str | None) -> str:
 
     # Ensure RC contains a single, marked source block
     _ensure_rc_sources_managed(config_path, managed_file, shell)
+    # Pick correct source command for user hint
+    source_cmd = (
+        "." if shell in {"sh", "powershell", "pwsh"} else "source"
+    )
     return (
         f"envon bootstrap installed:\n- managed: {managed_file}\n- rc: {config_path}\n"
-        f"Restart your shell or run: source {config_path}"
+        f"Restart your shell or run: {source_cmd} {config_path}"
     )
 
 
@@ -556,7 +649,9 @@ def get_managed_bootstrap_path(shell: str) -> Path:
     envon_dir = base / "envon"
 
     name = (
-        "envon.bash" if shell in {"bash", "zsh", "sh"} else
+        "envon.bash" if shell == "bash" else
+        "envon.zsh" if shell == "zsh" else
+        "envon.sh" if shell == "sh" else
         "envon.fish" if shell == "fish" else
         "envon.nu" if shell in {"nushell", "nu"} else
         "envon.ps1" if shell in {"powershell", "pwsh"} else
@@ -638,12 +733,13 @@ def _maybe_update_managed_current_shell(explicit_shell: str | None) -> None:
         managed = get_managed_bootstrap_path(shell)
         if managed.exists():
             desired = _managed_content_for_shell(
-                "bash" if shell in {"bash", "zsh", "sh"}
-                else "fish" if shell == "fish"
-                else "nushell" if shell in {"nushell", "nu"}
-                else "powershell" if shell in {"powershell", "pwsh"}
-                else "csh" if shell in {"csh", "tcsh", "cshell"}
-                else shell
+                "bash" if shell == "bash" else
+                "zsh" if shell == "zsh" else
+                "sh" if shell == "sh" else
+                "fish" if shell == "fish" else
+                "nushell" if shell in {"nushell", "nu"} else
+                "powershell" if shell in {"powershell", "pwsh"} else
+                "csh" if shell in {"csh", "tcsh", "cshell"} else shell
             )
             try:
                 current = managed.read_text(encoding="utf-8")
