@@ -1,5 +1,4 @@
-﻿# envon bootstrap for PowerShell
-function envon {
+﻿function envon {
   param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
   $envonExe = Get-Command envon -CommandType Application -ErrorAction SilentlyContinue
   if (-not $envonExe) { Write-Error 'envon console script not found on PATH'; return }

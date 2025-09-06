@@ -450,7 +450,10 @@ def emit_bootstrap(shell: str) -> str:
     if not bootstrap_file.exists():
         raise EnvonError(f"Bootstrap file missing: {bootstrap_file}")
     
-    return bootstrap_file.read_text(encoding="utf-8")
+    text = bootstrap_file.read_text(encoding="utf-8")
+    if text.startswith("\ufeff"):   # strip BOM
+        text = text.lstrip("\ufeff")
+    return text
 
 
 def get_shell_config_path(shell: str) -> Path:

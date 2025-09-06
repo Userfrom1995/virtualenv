@@ -1,5 +1,4 @@
-﻿# envon bootstrap for fish
-function envon
+﻿function envon
     if test (count $argv) -gt 0
         set first $argv[1]
         if test "$first" = "--"

@@ -1,5 +1,4 @@
-﻿# envon bootstrap for sh
-envon() {
+﻿envon() {
   if [ "$#" -gt 0 ]; then
     case "$1" in
       help|-h|--help|--install) command envon "$@"; return $? ;;

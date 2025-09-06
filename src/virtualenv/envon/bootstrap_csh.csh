@@ -1,11 +1,26 @@
-﻿alias envon 'if ( $#argv >= 0 ) then; switch ("$1") \
-case "help": \
-case "-h": \
-case "--help": \
-case "--install": \
-case "-*": \
-    \envon \!*; breaksw; \
-default: \
-    set _ev=`\envon \!*` && eval "$_ev" && unset _ev; breaksw; \
-endsw \
-endif'
+﻿alias envon 'set _ev=`\envon \!*` \
+if ( $status == 0 ) then \
+    eval "$_ev" \
+    if ( $status != 0 && $#argv >= 1 ) then \
+        switch ("$1") \
+        case "help": \
+        case "-h": \
+        case "--help": \
+        case "--install": \
+        case "-*": \
+            \envon \!* \
+            breaksw \
+        endsw \
+    endif \
+else if ( $#argv >= 1 ) then \
+    switch ("$1") \
+    case "help": \
+    case "-h": \
+    case "--help": \
+    case "--install": \
+    case "-*": \
+        \envon \!* \
+        breaksw \
+    endsw \
+endif \
+unset _ev'
