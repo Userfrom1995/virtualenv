@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from virtualenv.envon import (
+from virtualenv.envon.envon import (
     EnvonError,
     _choose_interactively,
     _emit_activation_fallback,

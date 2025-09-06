@@ -411,30 +411,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Emit the activation command for the nearest or specified virtual environment.",
     )
     p.add_argument("target", nargs="?", help="Path, project root, or name (searched in WORKON_HOME)")
-    # --emit: optional SHELL argument; if omitted, auto-detect current shell
-    p.add_argument(
-        "--emit",
-        nargs="?",
-        const="",
-        metavar="SHELL",
-        help=(
-            "Emit activation command. If SHELL is omitted, auto-detect. "
-            "Supported: bash, zsh, sh, fish, cshell/csh/tcsh, nushell/nu, powershell/pwsh, cmd/batch/bat"
-        ),
-    )
-    p.add_argument("--print-path", action="store_true", help="Print resolved venv path (no activation)")
-    # --bootstrap: optional SHELL argument; if omitted, auto-detect current shell
-    p.add_argument(
-        "--bootstrap",
-        nargs="?",
-        const="",
-        metavar="SHELL",
-        help=(
-            "Print a shell wrapper that evaluates envon's output so 'envon' directly activates the venv. "
-            "If SHELL is omitted, auto-detect."
-        ),
-    )
-    # --install: optional SHELL argument; if omitted, auto-detect current shell
     p.add_argument(
         "--install",
         nargs="?",
@@ -449,116 +425,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def emit_bootstrap(shell: str) -> str:
-    """Generate the bootstrap function for the given shell."""
-    s = shell.lower()
-    if s in {"bash", "zsh"}:
-        # Forward CLI flags to the real envon, only eval activation when args look like targets
-        return (
-            "envon() {\n"
-            "  if [ \"$#\" -gt 0 ]; then\n"
-            "    case \"$1\" in\n"
-            "      --) shift ;;\n"
-            "      help|-h|--help) command envon \"$@\"; return $? ;;\n"
-            "      -*) command envon \"$@\"; return $? ;;\n"
-            "    esac\n"
-            "  fi\n"
-            "  local cmd ec;\n"
-            f"  cmd=\"$(command envon --emit {s} \"$@\")\"; ec=$?\n"
-            "  if [ $ec -ne 0 ]; then printf %s\\n \"$cmd\" >&2; return $ec; fi\n"
-            "  eval \"$cmd\";\n"
-            "}\n"
-        )
-    if s == "sh":
-        # POSIX-compliant variant (avoid 'local')
-        return (
-            "envon() {\n"
-            "  if [ \"$#\" -gt 0 ]; then\n"
-            "    case \"$1\" in\n"
-            "      --) shift ;;\n"
-            "      help|-h|--help) command envon \"$@\"; return $? ;;\n"
-            "      -*) command envon \"$@\"; return $? ;;\n"
-            "    esac\n"
-            "  fi\n"
-            "  cmd=$(command envon --emit sh \"$@\"); ec=$?\n"
-            "  if [ $ec -ne 0 ]; then printf %s\\n \"$cmd\" >&2; return $ec; fi\n"
-            "  eval \"$cmd\";\n"
-            "}\n"
-        )
-    if s == "fish":
-        return (
-            "function envon\n"
-            "    if test (count $argv) -gt 0\n"
-            "        set first $argv[1]\n"
-            "        if test \"$first\" = \"--\"\n"
-            "            set -e argv[1]\n"
-            "        else if string match -rq '^(help|-h|--help|-).*' -- $first\n"
-            "            command envon $argv\n"
-            "            return $status\n"
-            "        end\n"
-            "    end\n"
-            "    set cmd (command envon --emit fish $argv)\n"
-            "    if test $status -ne 0\n"
-            "        echo $cmd >&2\n"
-            "        return 1\n"
-            "    end\n"
-            "    eval $cmd\n"
-            "end\n"
-        )
-
-    if s in {"nushell", "nu"}:
-        # Emit a Nushell function that prints the overlay command for the venv's activate.nu
-        # or a helpful warning if the activation script isn't present.
-        return (
-            "def --env envon [...args] {\n"
-            "  if ($args | is-empty) == false {\n"
-            "    let first = ($args | first)\n"
-            "    if $first == '--' { let args = ($args | skip 1); ^envon ...$args; return }\n"
-            "    if ($first == 'help') or ($first == '-h') or ($first == '--help') or (($first | str starts-with '-') == true) {\n"
-            "      ^envon ...$args; return\n"
-            "    }\n"
-            "  }\n"
-            "  let venv = (^envon --print-path ...$args | str trim)\n"
-            "  if ($venv | is-empty) { return }\n"
-            "  let is_windows = ($nu.os-info.name == 'windows')\n"
-            "  let act = (if $is_windows { ($venv | path join 'Scripts' 'activate.nu') } else { ($venv | path join 'bin' 'activate.nu') })\n"
-            "  if ($act | path exists) {\n"
-            "    echo $\"overlay use '($act | path expand)'\"\n"
-            "    echo 'Run the printed command in your interactive shell to activate the virtual environment.'\n"
-            "    return\n"
-            "  }\n"
-            "  echo 'Nushell activation script (activate.nu) not found for this virtual environment.'\n"
-            "  echo 'Create or upgrade the environment with a tool that generates Nushell activation scripts.'\n"
-            "}\n"
-        )
-
-    if s in {"powershell", "pwsh"}:
-        return (
-            "function envon {\n"
-            "  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)\n"
-            "  $envonExe = Get-Command envon -CommandType Application -ErrorAction SilentlyContinue\n"
-            "  if (-not $envonExe) { Write-Error 'envon console script not found on PATH'; return }\n"
-            "  if ($Args.Count -gt 0) {\n"
-            "    if ($Args[0] -eq '--') { $Args = $Args[1..($Args.Count-1)] }\n"
-            "    elseif ($Args[0] -eq 'help' -or $Args[0].StartsWith('-')) {\n"
-            "      & $envonExe.Source @Args; return\n"
-            "    }\n"
-            "  }\n"
-            "  $cmd = & $envonExe.Source --emit powershell @Args\n"
-            "  if ($LASTEXITCODE -ne 0) { Write-Error $cmd; return }\n"
-            "  Invoke-Expression $cmd\n"
-            "}\n"
-        )
-    if s in {"csh", "tcsh", "cshell"}:
-    # csh/tcsh bootstrap alias with guarded behavior:
-    # - Forward flags/help directly to external envon (no eval)
-    # - Evaluate activation only when args look like targets
-    # - Use \envon to bypass alias recursion
-    # Note: users may need to add this to ~/.cshrc (csh) or ~/.tcshrc (tcsh)
-        return (
-            "alias envon 'set _ev=`\\envon --emit csh \\!*` && eval $_ev && unset _ev'\n"
-        )
-
-    raise EnvonError(f"Unsupported shell for bootstrap: {shell}")
+    """Generate the bootstrap function for the given shell by reading from dedicated files."""
+    shell = shell.lower()
+    bootstrap_dir = Path(__file__).parent  # Directory of envon.py
+    
+    file_map = {
+        "bash": "bootstrap_bash.sh",
+        "zsh": "bootstrap_bash.sh",  # zsh reuses bash
+        "sh": "bootstrap_sh.sh",
+        "fish": "bootstrap_fish.fish",
+        "nushell": "bootstrap_nushell.nu",
+        "nu": "bootstrap_nushell.nu",
+        "powershell": "bootstrap_powershell.ps1",
+        "pwsh": "bootstrap_powershell.ps1",
+        "csh": "bootstrap_csh.csh",
+        "tcsh": "bootstrap_csh.csh",
+        "cshell": "bootstrap_csh.csh",
+    }
+    
+    if shell not in file_map:
+        raise EnvonError(f"Unsupported shell: {shell}")
+    
+    bootstrap_file = bootstrap_dir / file_map[shell]
+    if not bootstrap_file.exists():
+        raise EnvonError(f"Bootstrap file missing: {bootstrap_file}")
+    
+    return bootstrap_file.read_text(encoding="utf-8")
 
 
 def get_shell_config_path(shell: str) -> Path:
@@ -790,20 +682,13 @@ def main(argv: list[str] | None = None) -> int:
     ns = parse_args(argv or sys.argv[1:])
     try:
         # Opportunistic refresh of managed bootstrap (no-op if not installed)
-        _maybe_update_managed_current_shell(ns.emit)
-        if ns.bootstrap is not None:
-            bs_shell = detect_shell(ns.bootstrap)
-            print(emit_bootstrap(bs_shell))
-            return 0
+        _maybe_update_managed_current_shell(None)
         if ns.install is not None:
             result = install_bootstrap(ns.install)
             print(result)
             return 0
         venv = resolve_target(ns.target)
-        if ns.print_path:
-            print(str(venv))
-            return 0
-        shell = detect_shell(ns.emit)
+        shell = detect_shell(None)
         cmd = emit_activation(venv, shell)
         print(cmd)
         return 0
