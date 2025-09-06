@@ -6,6 +6,7 @@ import platform
 import shutil
 import sys
 from pathlib import Path
+import stat
 
 try:
     from virtualenv.run.plugin.base import PluginLoader
@@ -18,7 +19,6 @@ try:  # version info for managed bootstrap tagging
 except Exception:  # pragma: no cover - defensive fallback
     VENV_VERSION = "unknown"
 
-
 PREFERRED_NAMES = (".venv", "venv", "env", ".env")
 
 
@@ -30,11 +30,11 @@ def is_venv_dir(path: Path) -> bool:
     """Return True if the given path looks like a Python virtual environment directory."""
     if not path or not path.is_dir():
         return False
-    
+
     # Check for pyvenv.cfg file - this is the most reliable indicator
     if (path / "pyvenv.cfg").exists():
         return True
-    
+
     # Try to use virtualenv's activation system to detect available scripts
     if PluginLoader:
         try:
@@ -58,7 +58,7 @@ def is_venv_dir(path: Path) -> bool:
         except Exception:
             # Fall back to hardcoded detection
             pass
-    
+
     # Fallback: hardcoded detection for compatibility
     # Windows layout
     if (path / "Scripts" / "activate.bat").exists() or (path / "Scripts" / "Activate.ps1").exists():
@@ -67,7 +67,8 @@ def is_venv_dir(path: Path) -> bool:
     if (path / "bin" / "activate").exists():
         return True
     # Other shells
-    if (path / "bin" / "activate.fish").exists() or (path / "bin" / "activate.csh").exists() or (path / "bin" / "activate.nu").exists():
+    if (path / "bin" / "activate.fish").exists() or (path / "bin" / "activate.csh").exists() or (
+            path / "bin" / "activate.nu").exists():
         return True
     return False
 
@@ -120,7 +121,7 @@ def _choose_interactively(candidates: list[Path], context: str) -> Path:
     If stdin is not a TTY, print options and raise EnvonError.
     """
     if not sys.stdin.isatty():
-        lines = "\n".join(f"  {i+1}) {p}" for i, p in enumerate(candidates))
+        lines = "\n".join(f"  {i + 1}) {p}" for i, p in enumerate(candidates))
         raise EnvonError(
             f"Multiple virtual environments found in {context}. Choose one by passing a path or name:\n{lines}"
         )
@@ -263,25 +264,25 @@ def detect_shell(explicit: str | None) -> str:
 def emit_activation(venv: Path, shell: str) -> str:
     """Generate activation command using virtualenv's activation plugin system."""
     shell = shell.lower()
-    
+
     # Map shell names to activator entry point names
     shell_to_activator = {
         "bash": "bash",
         "zsh": "bash",  # zsh uses bash activator
-        "sh": "bash",   # sh uses bash activator
+        "sh": "bash",  # sh uses bash activator
         "fish": "fish",
         "csh": "cshell",
         "tcsh": "cshell",
         "cshell": "cshell",
-            "nu": "nushell",  # Map nushell to its activator
-            "nushell": "nushell",  # Map nushell to its activator
+        "nu": "nushell",  # Map nushell to its activator
+        "nushell": "nushell",  # Map nushell to its activator
         "powershell": "powershell",
         "pwsh": "powershell",
         "cmd": "batch",
         "batch": "batch",
         "bat": "batch",
     }
-    
+
     activator_name = shell_to_activator.get(shell)
     if not activator_name:
         supported = ", ".join(sorted(shell_to_activator.keys()))
@@ -289,14 +290,14 @@ def emit_activation(venv: Path, shell: str) -> str:
             f"Unsupported shell: {shell}. Supported shells: {supported}. "
             f"Specify --emit <shell> explicitly or omit --emit to auto-detect."
         )
-    
+
     # Try to use the plugin system to get proper script names
     if PluginLoader:
         try:
             activators = PluginLoader.entry_points_for("virtualenv.activate")
             if activator_name in activators:
                 activator_class = activators[activator_name]
-                
+
                 # Create a minimal mock creator to get script names
                 class MockCreator:
                     def __init__(self, venv_path):
@@ -305,17 +306,17 @@ def emit_activation(venv: Path, shell: str) -> str:
                             self.bin_dir = venv_path / "Scripts"
                         else:  # POSIX
                             self.bin_dir = venv_path / "bin"
-                
+
                 mock_creator = MockCreator(venv)
-                
+
                 # Try to determine activation script name from the activator
                 try:
                     # Create a temporary activator instance with minimal options
                     class MockOptions:
                         prompt = None
-                    
+
                     activator = activator_class(MockOptions())
-                    
+
                     # Get the templates to determine script names
                     if hasattr(activator, 'templates'):
                         for template in activator.templates():
@@ -323,7 +324,7 @@ def emit_activation(venv: Path, shell: str) -> str:
                                 script_name = activator.as_name(template)
                             else:
                                 script_name = template
-                            
+
                             script_path = mock_creator.bin_dir / script_name
                             if script_path.exists():
                                 return _generate_activation_command(script_path, shell)
@@ -333,7 +334,7 @@ def emit_activation(venv: Path, shell: str) -> str:
         except Exception:
             # Fall back to hardcoded paths if plugin system fails
             pass
-    
+
     # Fallback: Use hardcoded script detection
     return _emit_activation_fallback(venv, shell)
 
@@ -341,7 +342,7 @@ def emit_activation(venv: Path, shell: str) -> str:
 def _generate_activation_command(script_path: Path, shell: str) -> str:
     """Generate the appropriate activation command for the given script and shell."""
     shell = shell.lower()
-    
+
     if shell in {"bash", "zsh", "sh"}:
         return f". '{script_path.as_posix()}'"
     elif shell == "fish":
@@ -355,14 +356,14 @@ def _generate_activation_command(script_path: Path, shell: str) -> str:
         return f". '{script_path.as_posix()}'"
     elif shell in {"cmd", "batch", "bat"}:
         return f"call \"{script_path}\""
-    
+
     raise EnvonError(f"Unknown shell command format for: {shell}")
 
 
 def _emit_activation_fallback(venv: Path, shell: str) -> str:
     """Fallback activation detection using hardcoded paths."""
     shell = shell.lower()
-    
+
     if shell in {"bash", "zsh", "sh"}:
         act = venv / "bin" / "activate"
         if act.exists():
@@ -395,7 +396,7 @@ def _emit_activation_fallback(venv: Path, shell: str) -> str:
         act = venv / "Scripts" / "activate.bat"
         if act.exists():
             return f"call \"{act}\""
-    
+
     raise EnvonError(
         f"No activation script found for shell '{shell}' in '{venv}'. "
         "Try specifying --emit explicitly, or ensure the virtualenv's activation scripts exist."
@@ -428,7 +429,7 @@ def emit_bootstrap(shell: str) -> str:
     """Generate the bootstrap function for the given shell by reading from dedicated files."""
     shell = shell.lower()
     bootstrap_dir = Path(__file__).parent  # Directory of envon.py
-    
+
     file_map = {
         "bash": "bootstrap_bash.sh",
         "zsh": "bootstrap_bash.sh",  # zsh reuses bash
@@ -442,16 +443,16 @@ def emit_bootstrap(shell: str) -> str:
         "tcsh": "bootstrap_csh.csh",
         "cshell": "bootstrap_csh.csh",
     }
-    
+
     if shell not in file_map:
         raise EnvonError(f"Unsupported shell: {shell}")
-    
+
     bootstrap_file = bootstrap_dir / file_map[shell]
     if not bootstrap_file.exists():
         raise EnvonError(f"Bootstrap file missing: {bootstrap_file}")
-    
+
     text = bootstrap_file.read_text(encoding="utf-8")
-    if text.startswith("\ufeff"):   # strip BOM
+    if text.startswith("\ufeff"):  # strip BOM
         text = text.lstrip("\ufeff")
     return text
 
@@ -460,7 +461,7 @@ def get_shell_config_path(shell: str) -> Path:
     """Get the configuration file path for a given shell."""
     shell = shell.lower()
     home = Path.home()
-    
+
     if shell == "bash":
         # Try .bashrc first, fall back to .bash_profile
         bashrc = home / ".bashrc"
@@ -484,19 +485,33 @@ def get_shell_config_path(shell: str) -> Path:
         return config_dir / "config.nu"
     elif shell in {"powershell", "pwsh"}:
         if os.name == "nt":  # Windows
-            # Get PowerShell profile path
             documents = Path.home() / "Documents"
-            if shell == "pwsh":  # PowerShell Core
-                return documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
-            else:  # Windows PowerShell
-                return documents / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+            # Check for both possible profile file names
+            if shell == "pwsh":
+                core_profile = documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+                alt_core_profile = documents / "PowerShell" / "profile.ps1"
+                if core_profile.exists():
+                    return core_profile
+                if alt_core_profile.exists():
+                    return alt_core_profile
+                # Default to core_profile if neither exists
+                return core_profile
+            else:
+                win_profile = documents / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+                alt_win_profile = documents / "WindowsPowerShell" / "profile.ps1"
+                if win_profile.exists():
+                    return win_profile
+                if alt_win_profile.exists():
+                    return alt_win_profile
+                # Default to win_profile if neither exists
+                return win_profile
         else:  # POSIX PowerShell Core
             return home / ".config" / "powershell" / "Microsoft.PowerShell_profile.ps1"
     elif shell in {"csh", "tcsh", "cshell"}:
         if shell == "tcsh":
             return home / ".tcshrc"
         return home / ".cshrc"
-    
+
     raise EnvonError(f"Unknown shell configuration path for: {shell}")
 
 
@@ -505,14 +520,20 @@ def install_bootstrap(shell: str | None) -> str:
     shell = detect_shell(shell)  # auto-detect when None or empty string
     shell = shell.lower()
     config_path = get_shell_config_path(shell)
-    
-    # Ensure parent directory exists
+
+    # Ensure parent directory exists and target is a file path
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    
+    # Guard against a directory accidentally existing at the profile path
+    if config_path.exists() and config_path.is_dir():
+        raise EnvonError(
+            f"Profile path points to a directory, not a file: {config_path}. "
+            "Please remove/rename this directory or set the correct PowerShell profile file."
+        )
+
     # Managed bootstrap: write function to a stable file and source it from RC with markers
     managed_file = get_managed_bootstrap_path(shell)
     managed_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Generate function content for the managed file
     target_shell = (
         "bash" if shell == "bash" else
@@ -606,7 +627,8 @@ def _write_managed_if_changed(path: Path, content: str) -> None:
 
 def _ensure_rc_sources_managed(config_path: Path, managed_file: Path, shell: str) -> None:
     """Ensure the user's RC/profile sources the managed file, using idempotent markers."""
-    rc_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    rc_exists = config_path.exists() and config_path.is_file()
+    rc_text = config_path.read_text(encoding="utf-8") if rc_exists else ""
 
     # If already installed with markers, do nothing
     if MARK_START in rc_text and MARK_END in rc_text:
@@ -618,10 +640,10 @@ def _ensure_rc_sources_managed(config_path: Path, managed_file: Path, shell: str
     elif shell == "fish":
         block = f"\n{MARK_START}\nif test -f {mf}\n    source {mf}\nend\n{MARK_END}\n"
     elif shell in {"nushell", "nu"}:
-        # guard exists via ls check
+        # Always quote the managed file path to avoid extra positional argument errors
         block = (
             f"\n{MARK_START}\n"
-            f"if (ls {mf} | is-empty) == false {{\n    source {mf}\n}}\n"
+            f"if (ls '{mf}' | is-empty) == false {{\n    source '{mf}'\n}}\n"
             f"{MARK_END}\n"
         )
     elif shell in {"powershell", "pwsh"}:
@@ -635,9 +657,68 @@ def _ensure_rc_sources_managed(config_path: Path, managed_file: Path, shell: str
     else:
         raise EnvonError(f"Unsupported shell: {shell}")
 
-    # Append the block
-    with config_path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    # Write or append the block with a robust fallback for Windows I/O quirks
+    try:
+        # Try to clear read-only flag if present
+        if rc_exists:
+            try:
+                os.chmod(config_path, stat.S_IWRITE | stat.S_IREAD)
+            except Exception:
+                pass
+        if not rc_exists:
+            # Create new profile file with our block
+            config_path.write_text(block, encoding="utf-8")
+        else:
+            with config_path.open("a", encoding="utf-8") as f:
+                f.write(block)
+    except OSError as e:
+        # Fallback: write the full combined content (existing + block)
+        combined = rc_text + block
+        try:
+            config_path.write_text(combined, encoding="utf-8")
+        except Exception as e2:
+            # On PowerShell, also try the alternate profile file name
+            if shell in {"powershell", "pwsh"}:
+                try:
+                    alt_name = (
+                        "Microsoft.PowerShell_profile.ps1"
+                        if config_path.name.lower() == "profile.ps1"
+                        else "profile.ps1"
+                    )
+                    alt_path = config_path.with_name(alt_name)
+                    alt_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        # Clear read-only if exists
+                        if alt_path.exists():
+                            try:
+                                os.chmod(alt_path, stat.S_IWRITE | stat.S_IREAD)
+                            except Exception:
+                                pass
+                        # If alternate exists and already contains our block, we're done
+                        try:
+                            alt_text = alt_path.read_text(encoding="utf-8")
+                        except Exception:
+                            alt_text = ""
+                        if MARK_START in alt_text and MARK_END in alt_text:
+                            return
+                        # Otherwise write combined content to alternate profile
+                        alt_combined = alt_text + block if alt_text else block
+                        alt_path.write_text(alt_combined, encoding="utf-8")
+                        return
+                    except Exception as e3:
+                        raise EnvonError(
+                            "Failed to update PowerShell profile. Tried both: "
+                            f"{config_path} (error: {e2}) and {alt_path} (error: {e3}). "
+                            "Close any editor locking the file, ensure it's not a directory or read-only, "
+                            "or create the file manually and re-run."
+                        ) from e3
+                except Exception:
+                    # If building alt path failed, fall through to generic error
+                    pass
+            # Generic failure if all fallbacks failed
+            raise EnvonError(
+                f"Failed to update shell profile at {config_path}: {e2}"
+            ) from e
 
 
 def _managed_content_for_shell(shell: str) -> str:
